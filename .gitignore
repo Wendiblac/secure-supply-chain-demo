@@ -1,0 +1,3 @@
+*cosign.key
+# Ignore all .key files
+*.key
