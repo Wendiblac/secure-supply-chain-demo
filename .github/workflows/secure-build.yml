@@ -1,0 +1,144 @@
+name: secure-build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+  packages: write        # push to GHCR
+  id-token: write        # OIDC for keyless signing
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }} # owner/repo
+  # Trivy gating: fail build on HIGH/CRITICAL
+  TRIVY_SEVERITY: HIGH,CRITICAL
+  TRIVY_FORMAT: json
+
+jobs:
+  build-sign-attest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build & push (with provenance)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+
+      - name: Compute immutable image reference (by digest)
+        id: imm
+        run: echo "IMAGE_REF=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}" >> $GITHUB_OUTPUT
+
+      - name: Install Trivy
+        uses: aquasecurity/trivy-action@0.24.0
+
+      - name: Trivy scan (fail on HIGH/CRITICAL)
+        run: |
+          trivy image --scanners vuln \
+            --ignore-unfixed \
+            --severity $TRIVY_SEVERITY \
+            --format $TRIVY_FORMAT \
+            --output trivy-results.json \
+            "${{ steps.imm.outputs.IMAGE_REF }}"
+          # Also enforce the gate (exit nonzero on findings)
+          trivy image --scanners vuln \
+            --ignore-unfixed \
+            --severity $TRIVY_SEVERITY \
+            --exit-code 1 \
+            "${{ steps.imm.outputs.IMAGE_REF }}"
+
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          trivy sbom --format cyclonedx \
+            --output sbom.cdx.json \
+            "${{ steps.imm.outputs.IMAGE_REF }}"
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Keyless sign image
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign sign --keyless "${{ steps.imm.outputs.IMAGE_REF }}"
+
+      - name: Attach SBOM to image
+        run: |
+          cosign attach sbom \
+            --sbom sbom.cdx.json \
+            "${{ steps.imm.outputs.IMAGE_REF }}"
+
+      - name: Attest Trivy results (vuln attestation)
+        run: |
+          cosign attest \
+            --predicate trivy-results.json \
+            --type vuln \
+            "${{ steps.imm.outputs.IMAGE_REF }}"
+
+      - name: Upload artifacts (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-artifacts
+          path: |
+            trivy-results.json
+            sbom.cdx.json
+
+    outputs:
+      image_ref: ${{ steps.imm.outputs.IMAGE_REF }}
+
+  verify:
+    runs-on: ubuntu-latest
+    needs: [ build-sign-attest ]
+    steps:
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      # Verify signature issuer (GitHub OIDC) and that it came from THIS repo/workflow.
+      - name: Verify signature (OIDC policy)
+        run: |
+          cosign verify \
+            --keyless \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/secure-build.yml@refs/heads/${{ github.ref_name }}" \
+            "${{ needs.build-sign-attest.outputs.image_ref }}"
+
+      # Verify there is at least one vulnerability attestation present
+      - name: Verify vuln attestation exists
+        run: |
+          cosign verify-attestation \
+            --type vuln \
+            "${{ needs.build-sign-attest.outputs.image_ref }}"
