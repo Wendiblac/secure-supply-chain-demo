@@ -38,7 +38,11 @@ jobs:
           provenance: true
           sbom: true
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.5.0
+        with:
+          cosign-release: 'v2.2.4'
+
       - name: Sign with Cosign
         run: |
-         cosign sign ghcr.io/wendiblac/secure-supply-chain-demo@${{ steps.build.outputs.digest }}
-
+          cosign sign --yes ghcr.io/wendiblac/secure-supply-chain-demo@${{ steps.build.outputs.digest }}
