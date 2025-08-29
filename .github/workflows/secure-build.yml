@@ -38,6 +38,8 @@ jobs:
 
       - name: Cosign Sign + Attest
         uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.2.3'   # or latest stable
       - run: |
-          cosign sign --keyless ghcr.io/wendiblac/secure-supply-chain-demo:dev-v1
-          cosign attest --keyless --predicate sbom.json --type spdx ghcr.io/wendiblac/secure-supply-chain-demo:dev-v1
+          cosign sign ghcr.io/wendiblac/secure-supply-chain-demo:dev-v1
+          cosign attest --predicate sbom.json --type spdx ghcr.io/wendiblac/secure-supply-chain-demo:dev-v1
