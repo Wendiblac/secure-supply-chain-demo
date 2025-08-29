@@ -28,18 +28,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push Image
+      - name: Build and Push image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: ghcr.io/wendiblac/secure-supply-chain-demo:dev-v1
+          provenance: true
+          sbom: true
 
+      - name: Sign with Cosign
+        run: |
+         cosign sign ghcr.io/wendiblac/secure-supply-chain-demo@${{ steps.build.outputs.digest }}
 
-      - name: Cosign Sign + Attest
-        uses: sigstore/cosign-installer@v3
-        with:
-          cosign-release: 'v2.2.3'   # or latest stable
-      - run: |
-          cosign sign ghcr.io/wendiblac/secure-supply-chain-demo:dev-v1
-          cosign attest --predicate sbom.json --type spdx ghcr.io/wendiblac/secure-supply-chain-demo:dev-v1
